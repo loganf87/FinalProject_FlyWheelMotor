@@ -173,7 +173,7 @@ const int RPM_ARRAY_SIZE = 5;  // Size of the rolling average window for both mo
 // Add these constants after other global constants
 const int FINS_PER_DISK = 2;  // Number of fins per disk
 const float DEGREES_PER_FIN = 360.0 / FINS_PER_DISK;  // Degrees between fins
-const float ALIGNMENT_TOLERANCE = 10.0;  // Degrees of acceptable misalignment
+const float ALIGNMENT_TOLERANCE = 20.0;  // Degrees of acceptable misalignment
 
 // Add global ProjectileMotion object
 ProjectileMotion *projectile = nullptr;
