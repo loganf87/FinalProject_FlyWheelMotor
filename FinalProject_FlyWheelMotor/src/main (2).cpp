@@ -173,7 +173,7 @@ const int RPM_ARRAY_SIZE = 5;  // Size of the rolling average window for both mo
 // Add these constants after other global constants
 const int FINS_PER_DISK = 2;  // Number of fins per disk
 const float DEGREES_PER_FIN = 360.0 / FINS_PER_DISK;  // Degrees between fins
-const float ALIGNMENT_TOLERANCE = 2.0;  // Degrees of acceptable misalignment
+const float ALIGNMENT_TOLERANCE = 10.0;  // Degrees of acceptable misalignment
 
 // Add global ProjectileMotion object
 ProjectileMotion *projectile = nullptr;
@@ -211,6 +211,11 @@ bool rpmArrayFullB = false;
 float disk1Position = 0.0;  // Absolute position of disk 1 in degrees
 float disk2Position = 0.0;  // Absolute position of disk 2 in degrees
 bool disksAligned = false;  // Flag for disk alignment status
+
+// Add these globals after other motor variables
+const int ALIGNED_COUNT_THRESHOLD = 3;  // Number of consecutive alignments needed
+int consecutiveAlignments = 0;         // Counter for consecutive alignments
+bool motor3Running = false;            // Track motor 3 state
 
 // Global control variables (shared)
 bool motorRunning = false;
@@ -252,6 +257,11 @@ const uint8_t IN4 = 27;    // L298N input 4 (changed from 35)
 const uint8_t ENB = 33;    // L298N enable B
 const uint8_t ENCODER_B = 18;  // Changed from 12 to 18
 
+// Add third motor pins after existing motor pin definitions
+const uint8_t IN5 = 22;    // L298N input 5
+const uint8_t IN6 = 21;    // L298N input 6
+const uint8_t ENC = 23;    // L298N enable C 
+
 // PWM configurations
 const uint8_t PWM_CHANNEL = 0;    // PWM channel for motor control
 const uint16_t PWM_FREQ = 1800;   // PWM frequency (10Hz-40MHz)
@@ -259,6 +269,9 @@ const uint8_t PWM_RESOLUTION = 8; // 8-bit resolution (0-255)
 
 // Add second motor PWM channel
 const uint8_t PWM_CHANNEL_B = 1;  // Different channel than first motor
+
+// Add third motor PWM channel after existing PWM definitions
+const uint8_t PWM_CHANNEL_C = 2;  // Different channel than first and second motors
 
 // Command processing variables
 String command = "";          // To store the complete command
@@ -288,8 +301,8 @@ const unsigned long RPM_PRINT_INTERVAL = 250;  // 250ms between RPM prints
 unsigned long lastRpmPrint = 0;  // Track last RPM print time
 
 // Update these constants for stabilization
-const float RPM_TOLERANCE = 10.0;         // Allow ±10 RPM deviation
-const unsigned long STABLE_TIME = 2000;    // Changed from 4000 to 2000ms (2 seconds stability requirement)
+const float RPM_TOLERANCE = 5.0;         // Reduced from 10.0 RPM deviation
+const unsigned long STABLE_TIME = 1000;    // Changed from 4000 to 2000ms (2 seconds stability requirement)
 const float ADJUSTMENT_RATE = 0.05;        // Small adjustment rate for smooth control
 
 // Add these new variables with other globals
@@ -298,15 +311,19 @@ bool adjustmentCooldown = false;
 // Update the adjustment interval constant
 const unsigned long ADJUST_INTERVAL = 500;  // Adjust every 500ms (half second)
 
-// Update these constants for faster adjustments
-const float COARSE_ADJUSTMENT = 2.0;     // Increased from 1.0 (for errors > 1000 RPM)
-const float MEDIUM_ADJUSTMENT = 1.0;     // Increased from 0.5 (for errors 500-1000 RPM)
-const float FINE_ADJUSTMENT = 0.5;       // Increased from 0.25 (for errors 250-500 RPM)
-const float ULTRA_FINE_ADJUSTMENT = 0.1; // Increased from 0.05 (for errors < 250 RPM)
+// Update these constants for even faster adjustments
+const float VERY_COARSE_ADJUSTMENT = 4;    // Reduced from 4.0
+const float COARSE_ADJUSTMENT = 2.5;         // Reduced from 2.5
+const float MEDIUM_ADJUSTMENT = 1.5;        // Reduced from 1.5
+const float FINE_ADJUSTMENT = 0.5;          // Reduced from 0.75
+const float ULTRA_FINE_ADJUSTMENT = 0.1;     // Reduced from 0.2
 
-const unsigned long COARSE_ADJUST_INTERVAL = 50;   // Decreased from 100ms for errors > 500
-const unsigned long MEDIUM_ADJUST_INTERVAL = 100;  // Decreased from 250ms for errors 250-500
-const unsigned long FINE_ADJUST_INTERVAL = 250;    // Decreased from 500ms for errors < 250
+const unsigned long VERY_COARSE_ADJUST_INTERVAL = 20;   // Reduced from 25ms
+const unsigned long COARSE_ADJUST_INTERVAL = 25;        // Reduced from 35ms
+const unsigned long MEDIUM_ADJUST_INTERVAL = 35;        // Reduced from 50ms
+const unsigned long FINE_ADJUST_INTERVAL = 50;         // Reduced from 100ms
+const unsigned long ULTRA_FINE_ADJUST_INTERVAL = 125;   // Reduced from 125ms
+
 const unsigned long SPEED_INTERVAL = 100;          // Interval for speed calculations in milliseconds
 
 // Convert encoder position to degrees
@@ -503,6 +520,15 @@ void setup()
   pinMode(ENCODER_B, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(ENCODER_B), handleEncoder2, RISING);
 
+  // Configure third motor control pins
+  pinMode(IN5, OUTPUT);
+  pinMode(IN6, OUTPUT);
+  digitalWrite(IN5, LOW);
+  digitalWrite(IN6, LOW);
+  ledcSetup(PWM_CHANNEL_C, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(ENC, PWM_CHANNEL_C);
+  ledcWrite(PWM_CHANNEL_C, 0);
+
   // Initialize RPM averaging array
   for (int i = 0; i < RPM_ARRAY_SIZE; i++)
   {
@@ -555,14 +581,24 @@ void loop() {
         // Motor 1 control logic
         float rpmError = abs(targetRPM - motorRPM);
         unsigned long currentAdjustInterval;
+        float adjustmentRate;
         
         if (!isStable) {
-            if (rpmError > 500) {
+            if (rpmError > 1000) {
+                currentAdjustInterval = VERY_COARSE_ADJUST_INTERVAL;
+                adjustmentRate = VERY_COARSE_ADJUSTMENT;
+            } else if (rpmError > 500) {
                 currentAdjustInterval = COARSE_ADJUST_INTERVAL;
+                adjustmentRate = COARSE_ADJUSTMENT;
             } else if (rpmError > 250) {
                 currentAdjustInterval = MEDIUM_ADJUST_INTERVAL;
-            } else {
+                adjustmentRate = MEDIUM_ADJUSTMENT;
+            } else if (rpmError > 50) {
                 currentAdjustInterval = FINE_ADJUST_INTERVAL;
+                adjustmentRate = FINE_ADJUSTMENT;
+            } else {
+                currentAdjustInterval = ULTRA_FINE_ADJUST_INTERVAL;
+                adjustmentRate = ULTRA_FINE_ADJUSTMENT;
             }
             
             if (currentTime - lastAdjustTime >= currentAdjustInterval) {
@@ -575,12 +611,6 @@ void loop() {
                     }
                 } else {
                     stableStartTime = currentTime;
-                    float adjustmentRate;
-                    if (rpmError > 1000) adjustmentRate = COARSE_ADJUSTMENT;
-                    else if (rpmError > 500) adjustmentRate = MEDIUM_ADJUSTMENT;
-                    else if (rpmError > 250) adjustmentRate = FINE_ADJUSTMENT;
-                    else adjustmentRate = ULTRA_FINE_ADJUSTMENT;
-
                     float adjustment = adjustmentRate * ((targetRPM - motorRPM) > 0 ? 1 : -1);
                     currentSpeedPercent += adjustment;
                     currentSpeedPercent = constrain(currentSpeedPercent, 0, 100);
@@ -590,19 +620,22 @@ void loop() {
         }
 
         // Update Motor 2 control logic section:
-        // Motor 2 control logic (runs simultaneously)
-        float rpmError2 = abs(targetRPM - motorRPM_B);  // Use same target as motor 1
+        float rpmError2 = abs(targetRPM - motorRPM_B);        
         unsigned long currentAdjustInterval2;
         unsigned long currentTimeM2 = millis();
 
         if (!isMotor2Stable) {
-            // Use same intervals as motor 1
-            if (rpmError2 > 500) {
+            // Assign values based on motor 2's error, not
+            if (rpmError2 > 1000) {
+                currentAdjustInterval2 = VERY_COARSE_ADJUST_INTERVAL;
+            } else if (rpmError2 > 500) {
                 currentAdjustInterval2 = COARSE_ADJUST_INTERVAL;
             } else if (rpmError2 > 250) {
                 currentAdjustInterval2 = MEDIUM_ADJUST_INTERVAL;
-            } else {
+            } else if (rpmError2 > 100) {
                 currentAdjustInterval2 = FINE_ADJUST_INTERVAL;
+            } else {
+                currentAdjustInterval2 = ULTRA_FINE_ADJUST_INTERVAL;
             }
 
             if (currentTimeM2 - lastAdjustTimeB >= currentAdjustInterval2) {
@@ -617,9 +650,10 @@ void loop() {
                     stableStartTime2 = currentTimeM2;
                     // Use exact same adjustment rates as motor 1
                     float adjustmentRate2;
-                    if (rpmError2 > 1000) adjustmentRate2 = COARSE_ADJUSTMENT;
-                    else if (rpmError2 > 500) adjustmentRate2 = MEDIUM_ADJUSTMENT;
-                    else if (rpmError2 > 250) adjustmentRate2 = FINE_ADJUSTMENT;
+                    if (rpmError2 > 1000) adjustmentRate2 = VERY_COARSE_ADJUSTMENT;
+                    else if (rpmError2 > 500) adjustmentRate2 = COARSE_ADJUSTMENT;
+                    else if (rpmError2 > 250) adjustmentRate2 = MEDIUM_ADJUSTMENT;
+                    else if (rpmError2 > 100) adjustmentRate2 = FINE_ADJUSTMENT;
                     else adjustmentRate2 = ULTRA_FINE_ADJUSTMENT;
 
                     float adjustment2 = adjustmentRate2 * ((targetRPM - motorRPM_B) > 0 ? 1 : -1);
@@ -635,30 +669,36 @@ void loop() {
             lastRpmPrint = currentTimeM2;
             
             bool currentAlignment = checkDiskAlignment();
-            if (currentAlignment != disksAligned) {
-                disksAligned = currentAlignment;
-                if (disksAligned) {
-                    Serial.println(F("\n=== Disks Aligned ==="));
+            if (currentAlignment) {
+                consecutiveAlignments++;
+                // Only start motor 3 if both motors are stable and aligned 3 times
+                if (consecutiveAlignments >= ALIGNED_COUNT_THRESHOLD && !motor3Running && isStable && isMotor2Stable) {
+                    // Start motor 3
+                    motor3Running = true;
+                    digitalWrite(IN5, HIGH);
+                    digitalWrite(IN6, LOW);
+                    ledcWrite(PWM_CHANNEL_C, map(35, 0, 100, MIN_PWM, MAX_PWM));
+                    Serial.println(F("\n=== Starting Motor 3 at 35% ==="));
                 }
+            } else {
+                consecutiveAlignments = 0;  // Reset counter if not aligned
             }
             
-            // Add disk positions to status display
+            // Print status including alignment and stability
             Serial.print(F("Target: ")); 
             Serial.print(targetRPM, 1);
-            Serial.print(F(" | M1: "));
+            Serial.print(F(" | M1: ")); 
             Serial.print(motorRPM, 1);
-            Serial.print(F(" ("));
-            Serial.print(abs(targetRPM - motorRPM), 1);
-            Serial.print(F(") "));
-            Serial.print(isStable ? F("Stable") : F("Adjusting"));
-            Serial.print(F(" | M2: "));
+            Serial.print(F("("));
+            Serial.print(isStable ? "S" : "U");
+            Serial.print(F(") | M2: "));
             Serial.print(motorRPM_B, 1);
-            Serial.print(F(" ("));
-            Serial.print(abs(targetRPM - motorRPM_B), 1);
-            Serial.print(F(") "));
-            Serial.print(isMotor2Stable ? F("Stable") : F("Adjusting"));
-            Serial.print(F(" | Aligned: "));
-            Serial.println(disksAligned ? F("Yes") : F("No"));
+            Serial.print(F("("));
+            Serial.print(isMotor2Stable ? "S" : "U");
+            Serial.print(F(") | Aligned: "));
+            Serial.print(disksAligned ? F("Yes(") : F("No("));
+            Serial.print(consecutiveAlignments);
+            Serial.println(F(")"));
         }
 
         // Initialize both motors when starting
@@ -799,7 +839,7 @@ void loop() {
                 isMotor2Stable = false;
 
                 if (!motorRunning) {
-                    // Stop both motors
+                    // Stop all motors
                     // Motor 1
                     digitalWrite(IN1, LOW);
                     digitalWrite(IN2, LOW);
@@ -809,6 +849,14 @@ void loop() {
                     digitalWrite(IN3, LOW);
                     digitalWrite(IN4, LOW);
                     ledcWrite(PWM_CHANNEL_B, 0);
+                    
+                    // Motor 3
+                    digitalWrite(IN5, LOW);
+                    digitalWrite(IN6, LOW);
+                    ledcWrite(PWM_CHANNEL_C, 0);
+                    motor3Running = false;
+                    consecutiveAlignments = 0;  // Reset alignment counter
+                    disksAligned = false;       // Reset alignment status
                     
                     // Reset variables
                     currentSpeedPercent = 0.0;
